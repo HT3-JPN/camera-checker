@@ -97,9 +97,68 @@ def extract_prices_from_page(page, model: str) -> list[int]:
     return sorted(filtered)
 
 
+def shorten_model_variants(model: str) -> list[str]:
+    """
+    型番を段階的に短縮したバリアントリストを返す（元の型番は含まない）
+
+    例:
+        DMC-GF3X-K  → [DMC-GF3X, GF3X]
+        EOS Kiss X2 → [Kiss X2, X2]
+        NEX-5NK     → [NEX-5N, NEX-5]
+        DSC-W80     → [W80]
+    """
+    variants = []
+    current = model.strip()
+
+    # Step 1: 末尾の色/バリアントコードを除去（例: -K, -W, -BK, -WH など）
+    color_suffix = re.compile(
+        r'[-\s](?:WH|BK|SL|GE|GY|RD|BL|PK|VT|BR|OR|[KWSBRNTDPA])$',
+        re.IGNORECASE
+    )
+    shortened = color_suffix.sub('', current)
+    if shortened != current and len(shortened) > 2:
+        variants.append(shortened)
+        current = shortened
+
+    # Step 2: 先頭セグメントを除去しながら短縮（ハイフン・スペース区切り）
+    for _ in range(5):  # 最大5回短縮
+        m = re.match(r'^[^\s\-][\w]*[-\s]+(.+)$', current, re.IGNORECASE)
+        if m:
+            next_val = m.group(1).strip()
+            if len(next_val) > 1 and next_val not in variants and next_val != current:
+                variants.append(next_val)
+                current = next_val
+            else:
+                break
+        else:
+            break
+
+    return variants
+
+
+def search_with_keyword(page, maker: str, keyword_model: str, date_param: str) -> tuple[list[int], str]:
+    """指定キーワードでaucfanを検索し、価格リストとURLを返す"""
+    keyword = f"{maker} {keyword_model}"
+    encoded = encode_keyword(keyword)
+    url = f"https://aucfan.com/search1/q-{encoded}/s-mc/{date_param}/?o=de"
+
+    page.goto(url)
+    try:
+        page.wait_for_function(
+            "document.body.innerText.length > 3000",
+            timeout=5000
+        )
+    except Exception:
+        pass
+
+    prices = extract_prices_from_page(page, keyword_model)
+    return prices, url
+
+
 def get_mercari_stats(maker: str, model: str, progress_callback=None) -> dict:
     """
     メーカー・型番でaucfanを検索し、メルカリ90日間統計を返す
+    0件の場合は型番を短縮して自動リトライ
 
     Returns:
         {
@@ -107,61 +166,53 @@ def get_mercari_stats(maker: str, model: str, progress_callback=None) -> dict:
             "median": 中央値,
             "max": 最高値,
             "min": 最低値,
-            "url": 検索URL
+            "url": 検索URL,
+            "search_model": 実際に使用した型番
         }
     """
-    keyword = f"{maker} {model}"
-    encoded = encode_keyword(keyword)
     date_param = get_date_param()
-    url = f"https://aucfan.com/search1/q-{encoded}/s-mc/{date_param}/?o=de"
 
     result = {
         "count": 0,
         "median": None,
         "max": None,
         "min": None,
-        "url": url,
+        "url": f"https://aucfan.com/search1/q-{encode_keyword(maker + ' ' + model)}/s-mc/{date_param}/?o=de",
+        "search_model": model,
         "error": None,
     }
+
+    # 試すキーワードのリスト（元の型番 + 短縮バリアント）
+    candidates = [model] + shorten_model_variants(model)
 
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-
-            # タイムアウト設定
             page.set_default_timeout(15000)
 
-            page.goto(url)
+            for candidate in candidates:
+                prices, url = search_with_keyword(page, maker, candidate, date_param)
 
-            # SPA読み込み待機（最大5秒）
-            try:
-                page.wait_for_function(
-                    "document.body.innerText.length > 3000",
-                    timeout=5000
-                )
-            except Exception:
-                pass  # タイムアウトしても続行
+                if prices:
+                    # ヒットした！
+                    n = len(prices)
+                    median = prices[n // 2] if n % 2 == 1 else round((prices[n // 2 - 1] + prices[n // 2]) / 2)
+                    result.update({
+                        "count": n,
+                        "median": median,
+                        "max": max(prices),
+                        "min": min(prices),
+                        "url": url,
+                        "search_model": candidate,
+                    })
+                    break  # 結果が出たのでリトライ不要
 
-            # 価格抽出
-            prices = extract_prices_from_page(page, model)
+                # 0件なら次の候補へ（0.5秒待機）
+                if candidate != candidates[-1]:
+                    time.sleep(0.5)
+
             browser.close()
-
-        if not prices:
-            return result
-
-        n = len(prices)
-        if n % 2 == 1:
-            median = prices[n // 2]
-        else:
-            median = round((prices[n // 2 - 1] + prices[n // 2]) / 2)
-
-        result.update({
-            "count": n,
-            "median": median,
-            "max": max(prices),
-            "min": min(prices),
-        })
 
     except Exception as e:
         result["error"] = str(e)
@@ -189,9 +240,14 @@ def batch_search(cameras: list[dict], progress_callback=None) -> list[dict]:
 
         stats = get_mercari_stats(cam['maker'], cam['model'])
 
+        search_model = stats.get("search_model", cam.get("model", ""))
+        model_display = cam.get("model", "")
+        if search_model != model_display:
+            model_display = f"{model_display} → {search_model}"
+
         results.append({
             "メーカー": cam.get("maker", ""),
-            "型番": cam.get("model", ""),
+            "型番": model_display,
             "仕入価格(税込)": cam.get("price_tax_in", 0),
             "件数": stats["count"],
             "中央値": stats["median"],
