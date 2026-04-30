@@ -9,10 +9,27 @@ Streamlit Webアプリ メインファイル
 
 import io
 import os
+import sys
+import subprocess
 import streamlit as st
 import pandas as pd
 from camera_ocr import extract_cameras_from_images
 from aucfan_scraper import batch_search
+
+# ─────────────────────────────────────────
+# Playwright ブラウザのインストール（Streamlit Cloud用）
+# ─────────────────────────────────────────
+@st.cache_resource
+def setup_playwright():
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True, capture_output=True
+        )
+    except Exception:
+        pass
+
+setup_playwright()
 
 # ─────────────────────────────────────────
 # ページ設定
