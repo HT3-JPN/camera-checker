@@ -41,6 +41,35 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────
+# パスワード認証
+# ─────────────────────────────────────────
+def check_password():
+    correct_password = st.secrets.get("APP_PASSWORD", "")
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if st.session_state.authenticated:
+        return True
+
+    st.title("📷 中古カメラ 相場チェッカー")
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.subheader("🔒 ログイン")
+        password = st.text_input("パスワードを入力してください", type="password")
+        if st.button("ログイン", use_container_width=True):
+            if password == correct_password:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("パスワードが違います")
+    return False
+
+if not check_password():
+    st.stop()
+
+# ─────────────────────────────────────────
 # サイドバー：設定
 # ─────────────────────────────────────────
 with st.sidebar:
